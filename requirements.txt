@@ -1,0 +1,7 @@
+geopy
+shapely
+requests
+Flask==0.11.1
+Flask-Cors==3.0.2
+tornado
+psycopg2
