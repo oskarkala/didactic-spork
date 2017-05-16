@@ -1,7 +1,7 @@
 from flask_cors import CORS
 from shapely import geos
 from geopy.geocoders import Nominatim
-from flask import Flask, abort, Blueprint
+from flask import Flask, abort, Blueprint, jsonify
 from psycopg2.extensions import ISOLATION_LEVEL_AUTOCOMMIT
 import time
 import os
@@ -90,9 +90,10 @@ def init_db(db):
                     " po_name varchar,"
                     " geom geometry,"
                     " category_name varchar,"
+                    " category varchar,"
                     " address varchar,"
-                    " latitude integer,"
-                    " longitude integer,"
+                    " latitude varchar,"
+                    " longitude varchar,"
                     " venue_name varchar, "
                     " url varchar);")
     except psycopg2.InternalError as e:
@@ -129,12 +130,27 @@ def cnx_to_psql(db, user, host):
     return cnx
 
 
-def get_from_db(zip_code):
+def get_from_db(zip_code, category):
+    dct = {}
+
     cnx = cnx_to_psql(db=POSTGRES_DB, user=POSTGRES_USER, host=POSTGRES_HOST)
     cur = cnx.cursor()
-    cur.execute("SELECT * from bayareadata where zip_code=%(zip_code)s" % {'zip_code': zip_code})
+    cur.execute("SELECT * FROM venues WHERE zip_code=%(zip_code)s AND category='%(category)s'" % {'zip_code': zip_code,
+                                                                                                      'category': str(category)})
     rows = cur.fetchone()
-    return rows
+
+    dct['zip_code'] = rows[1]
+    dct['po_name'] = rows[2]
+    dct['geom'] = rows[3]
+    dct['category_name'] = rows[4]
+    dct['category'] = rows[5]
+    dct['address'] = rows[6]
+    dct['latitude'] = rows[7]
+    dct['longitude'] = rows[8]
+    dct['venue_name'] = rows[9]
+    dct['url'] = rows[10]
+
+    return dct
 
 
 # Method to return the foursquare IDs for categories
@@ -154,6 +170,8 @@ def get_category_id(category):
 # Method to create a list with all possible data from foursquare
 def create_venues_array(venues_list, zip_code, po_name, geom):
     venues = []
+    category = venues_list['category']
+    venues_list = venues_list['data']['response']['venues']
     for x in venues_list:
         venue_data = {}
 
@@ -177,6 +195,11 @@ def create_venues_array(venues_list, zip_code, po_name, geom):
             venue_data['category_name'] = 'No data provided'
 
         try:
+            venue_data['category'] = category
+        except KeyError:
+            venue_data['category'] = 'No data provided'
+
+        try:
             venue_data['address'] = x['location']['formattedAddress']
         except KeyError:
             venue_data['address'] = 'No data provided'
@@ -197,7 +220,9 @@ def create_venues_array(venues_list, zip_code, po_name, geom):
 
 
 # Method to query the foursquare API with different parameters
-def foursquare_query(category_id, zip_code=None, coordinates=None, radius=None):
+def foursquare_query(category, zip_code=None, coordinates=None, radius=None):
+    category_id = get_category_id(category=category)
+
     if radius is None:
         radius = ''
     elif radius is not None:
@@ -221,7 +246,10 @@ def foursquare_query(category_id, zip_code=None, coordinates=None, radius=None):
                                                                                             'CLIENT_ID': CLIENT_ID,
                                                                                             'CLIENT_SECRET': CLIENT_SECRET,
                                                                                             'DATE': DATE}
-    data = json.loads(requests.get(url).text)
+    data = {
+        'data': json.loads(requests.get(url).text),
+        'category': category
+    }
     return data
 
 
@@ -273,7 +301,7 @@ def insert_to_table(array, cnx, table=None):
                 geom = 'No data provided'
 
             try:
-                venue_name = venue['name']
+                venue_name = venue['venue_name']
             except KeyError:
                 venue_name = 'No data provided'
 
@@ -286,6 +314,11 @@ def insert_to_table(array, cnx, table=None):
                 category_name = venue['category_name']
             except KeyError:
                 category_name = 'No data provided'
+
+            try:
+                category = venue['category']
+            except KeyError:
+                category = 'No data provided'
 
             try:
                 address = venue['address']
@@ -303,9 +336,9 @@ def insert_to_table(array, cnx, table=None):
                 longitude = 'No data provided'
 
             add_data = ("INSERT INTO " + table +
-                        "(zip_code, po_name, geom, category_name, address, latitude, longitude, venue_name, url) "
-                        "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)")
-            data = (zip_code, po_name, geom, category_name, address, latitude, longitude, venue_name, url)
+                        "(zip_code, po_name, geom, category_name, category, address, latitude, longitude, venue_name, url) "
+                        "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)")
+            data = (zip_code, po_name, geom, category_name, category, address, latitude, longitude, venue_name, url)
 
             cur.execute(add_data, data)
             cnx.commit()
@@ -345,7 +378,6 @@ def txt_to_psql():
 
 
 def input_data(category):
-    category_id = get_category_id(category=category)
     venues = []
 
     cnx = cnx_to_psql(db=POSTGRES_DB, user=POSTGRES_USER, host=POSTGRES_HOST)
@@ -358,8 +390,8 @@ def input_data(category):
         po_name = str(row[2])
         #geom = get_ewkt(row)
         geom = row[3]
-        foursquare_response = foursquare_query(zip_code=zip_code, category_id=category_id)
-        venues_list = foursquare_response['response']['venues']
+        foursquare_response = foursquare_query(zip_code=zip_code, category=category)
+        venues_list = foursquare_response
         entry = create_venues_array(venues_list=venues_list, zip_code=zip_code, po_name=po_name, geom=geom)
         insert_to_table(entry, cnx, table='venues')
         venues.append(entry)
@@ -371,6 +403,21 @@ def input_data(category):
     return output
 
 
+category_map = {
+    'Boxing Gym': 'gym',
+    'Climbing Gym': 'gym',
+    'Cycle Studio': 'gym',
+    'Gym Pool': 'gym',
+    'Gymnastics Gym': 'gym',
+    'Gym': 'gym',
+    'Martial Arts Dojo': 'gym',
+    'Outdoor Gym': 'gym',
+    'Pilates Studio': 'gym',
+    'Track': 'gym',
+    'Weight Loss Center': 'gym',
+    'Yoga Studio': 'gym'
+}
+
 @bp.route('/')
 def hello_tp():
     return 'Hello Teleport. This is me, Oskar!'
@@ -378,19 +425,7 @@ def hello_tp():
 
 @bp.route('/single_zip/<zip_code>/<category>')
 def single_zip(zip_code, category):
-    category_id = get_category_id(category=category)
-    rows = get_from_db(zip_code=zip_code)
-
-    try:
-        po_name = rows[2]
-    except TypeError:
-        abort(400)
-
-    geom = rows[3]
-    foursquare_response = foursquare_query(zip_code=zip_code, category_id=category_id, radius=QUERY_RADIUS)
-    venues_list = foursquare_response['response']['venues']
-
-    venues = create_venues_array(venues_list=venues_list, zip_code=zip_code, po_name=po_name, geom=geom)
+    venues = get_from_db(zip_code=zip_code, category=category)
     response = {'venues': venues,
                 'category': category}
 
@@ -401,21 +436,11 @@ def single_zip(zip_code, category):
 @bp.route('/multiple_zip/<zip_codes>/<category>')
 def multiple_zip(zip_codes, category):
     zip_array = zip_codes.split(sep=',')
-    category_id = get_category_id(category=category)
     venues = []
 
     for zip_code in zip_array:
-        rows = get_from_db(zip_code=zip_code)
-
-        try:
-            po_name = rows[2]
-        except TypeError:
-            abort(400)
-
-        geom = rows[3]
-        foursquare_response = foursquare_query(zip_code=zip_code, category_id=category_id)
-        venues_list = foursquare_response['response']['venues']
-        venues.append(create_venues_array(venues_list=venues_list, zip_code=zip_code, po_name=po_name, geom=geom))
+        venues_list = get_from_db(zip_code=zip_code, category=category)
+        venues.append(venues_list)
 
     response = {'venues': venues,
                 'category': category}
@@ -426,22 +451,12 @@ def multiple_zip(zip_codes, category):
 
 @bp.route('/coord_radius/<lat_long>/<category>')
 def coord_radius(lat_long, category):
-    category_id = get_category_id(category=category)
 
     location = geolocator.reverse(lat_long)
     raw_location = location.raw
     zip_code = raw_location['address']['postcode']
 
-    rows = get_from_db(zip_code=zip_code)
-    try:
-        po_name = rows[2]
-    except TypeError:
-        abort(400)
-    geom = rows[3]
-    foursquare_response = foursquare_query(coordinates=lat_long, category_id=category_id, radius=QUERY_RADIUS)
-    venues_list = foursquare_response['response']['venues']
-
-    venues = create_venues_array(venues_list=venues_list, zip_code=zip_code, po_name=po_name, geom=geom)
+    venues = get_from_db(zip_code=zip_code, category=category)
 
     response = {'venues': venues,
                 'category': category}
@@ -452,7 +467,8 @@ def coord_radius(lat_long, category):
 
 init_db(db='postgres')
 txt_to_psql()
-input_data('cafe,gym')
+input_data('cafe')
+input_data('gym')
 
 app = Flask(__name__)
 app.register_blueprint(bp, url_prefix=APP_URL_PREFIX)

@@ -24,7 +24,7 @@ Three endpoints, all result a **JSON** response. Each query is backed by the bay
 **endpoints:**  
 Possible category slugs: 'cafe', 'gym' and 'cafe/gym'  
 **/single_zip/\<zip_code\>/\<category\>**  
-Searches the Foursquare API for venues matching the zip code.  
+Searches the Postgres DB for venues matching the zip code.  
 
 
 **/multiple_zip/\<zip_codes\>/\<category\>**  
